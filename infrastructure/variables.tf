@@ -9,4 +9,6 @@ variable "azure_location" {
 
 variable "resource_group_name" {
   description = "Azure resource group name"
+  default     = "azure-app-vnet-1-rg"
 }
+
