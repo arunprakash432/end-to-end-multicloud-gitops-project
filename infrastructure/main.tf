@@ -22,7 +22,7 @@ module "aws_vpc_2" {
 
 module "aws_eks_2" {
     source = "./modules/cluster-b-app/aws-eks-2"
-    cluster_name = "aws-app-vpc-2"
+    cluster_name = "aws-app-eks-2"
     vpc_id = module.aws_vpc_2.vpc_id
     private_subnets = module.aws_vpc_2.private_subnets
 }
