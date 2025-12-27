@@ -1,0 +1,13 @@
+server:
+  global:
+    scrape_interval: 15s
+
+  # Cluster A (Central) will scrape Clusters B and C via these endpoints
+  extraScrapeConfigs: |
+    - job_name: 'cluster-b-metrics'
+      static_configs:
+        - targets: ['<CLUSTER-B-IP>:9100']
+    
+    - job_name: 'cluster-c-metrics'
+      static_configs:
+        - targets: ['<CLUSTER-C-IP>:9100']

@@ -1,0 +1,12 @@
+replicaCount: 2
+
+image:
+  repository: docker.io/YOUR_DOCKERHUB_USERNAME/python-webapp
+  pullPolicy: Always
+  # Jenkins will sed/replace this tag during the build pipeline
+  tag: "latest"
+
+service:
+  type: LoadBalancer  # Exposes app to the internet
+  port: 80
+  targetPort: 5000    # Matches your Flask EXPOSE 5000
