@@ -81,7 +81,7 @@ pipeline {
                             
                             git add .
                             # The || true prevents failure if there are no changes to commit
-                            git commit -m "CI: Build ${DOCKER_TAG} - Update tag and endpoints" || true
+                            git commit -m "CI: Build ${DOCKER_TAG} - Update tag and endpoints [skip ci]" || true
                             
                             # Push to the remote
                             git push https://${GIT_USER}:${GIT_PASS}@${GIT_REPO_URL.replace('https://', '')} ${GIT_BRANCH}
