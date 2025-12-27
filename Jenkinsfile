@@ -17,7 +17,7 @@ pipeline {
         
         // Cluster Names from your main.tf
         CLUSTER_A_NAME  = "eks-cluster-monitoring-1"
-        CLUSTER_B_NAME  = "aws-app-vpc-2" 
+        CLUSTER_B_NAME  = "aws-app-eks-2" 
     }
 
     stages {
