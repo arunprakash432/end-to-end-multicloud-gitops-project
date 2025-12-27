@@ -22,6 +22,6 @@ provider "aws" {
 
 provider "azurerm" {
     features {}
-    subscription_id = "subscription-id"
+    subscription_id = var.subscription_id
 
 }
