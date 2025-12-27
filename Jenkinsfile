@@ -70,8 +70,8 @@ pipeline {
                     // 3. Commit and Push back to Git
                     withCredentials([usernamePassword(credentialsId: 'git-creds', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
                         sh """
-                            git config user.email "jenkins@bot.com"
-                            git config user.name "Jenkins Bot"
+                            git config user.email "prakasharun484@gmail.com"
+                            git config user.name "arunprakash432"
                             git add .
                             git commit -m "Automated update: Tag ${DOCKER_TAG} and Cluster Endpoints" || echo "No changes"
                             git push https://${GIT_USER}:${GIT_PASS}@${GIT_REPO_URL.replace('https://', '')} ${GIT_BRANCH}

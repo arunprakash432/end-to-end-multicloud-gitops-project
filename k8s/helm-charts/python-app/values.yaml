@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: docker.io/YOUR_DOCKERHUB_USERNAME/python-webapp
+  repository: docker.io/dockervarun432/python-webapp-flask
   pullPolicy: Always
   # Jenkins will sed/replace this tag during the build pipeline
   tag: "latest"
