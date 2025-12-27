@@ -5,7 +5,7 @@ pipeline {
         // --- Configuration ---
         DOCKER_REGISTRY = "docker.io"
         DOCKER_USER     = "dockervarun432" 
-        IMAGE_NAME      = "python-webapp"
+        IMAGE_NAME      = "python-webapp-flask"
         DOCKER_TAG      = "${BUILD_NUMBER}"
         GIT_REPO_URL    = "https://github.com/arunprakash432/end-to-end-multicloud-gitops-project.git"
         GIT_BRANCH      = "main"
