@@ -4,7 +4,7 @@ pipeline {
     environment {
         // --- Configuration ---
         DOCKER_REGISTRY = "docker.io"
-        DOCKER_USER     = "arunprakash432" 
+        DOCKER_USER     = "dockervarun432" 
         IMAGE_NAME      = "python-webapp"
         DOCKER_TAG      = "${BUILD_NUMBER}"
         GIT_REPO_URL    = "https://github.com/arunprakash432/end-to-end-multicloud-gitops-project.git"
