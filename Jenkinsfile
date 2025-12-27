@@ -65,16 +65,25 @@ pipeline {
         stage('GitOps: Update Manifests & Registry') {
             steps {
                 script {
+                    // 1. Update files locally
                     sh "sed -i 's/tag: .*/tag: \"${DOCKER_TAG}\"/' k8s/helm-charts/python-app/values.yaml"
                     sh "sed -i 's|server:.*|server: \"${env.CLUSTER_B_URL}\"|' k8s/argocd-apps/app-cluster-b.yaml"
                     sh "sed -i 's|server:.*|server: \"${env.CLUSTER_C_URL}\"|' k8s/argocd-apps/app-cluster-c.yaml"
 
+                    // 2. Commit and Push with "Checkout" fix
                     withCredentials([usernamePassword(credentialsId: 'git-creds', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
                         sh """
+                            # This is the FIX: Ensure we are on the main branch
+                            git checkout ${GIT_BRANCH} || git checkout -b ${GIT_BRANCH}
+                            
                             git config user.email "prakasharun484@gmail.com"
                             git config user.name "arunprakash432"
+                            
                             git add .
-                            git commit -m "CI: Build ${DOCKER_TAG} - Update tag and endpoints" || echo "No changes"
+                            # The || true prevents failure if there are no changes to commit
+                            git commit -m "CI: Build ${DOCKER_TAG} - Update tag and endpoints" || true
+                            
+                            # Push to the remote
                             git push https://${GIT_USER}:${GIT_PASS}@${GIT_REPO_URL.replace('https://', '')} ${GIT_BRANCH}
                         """
                     }
