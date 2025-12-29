@@ -1,8 +1,8 @@
-output "name" {
-  value = azurerm_kubernetes_cluster.this.name
+output "aks_cluster_name" {
+  value = azurerm_kubernetes_cluster.aks.name
 }
 
 output "kube_config" {
-  value     = azurerm_kubernetes_cluster.this.kube_config
+  value     = azurerm_kubernetes_cluster.aks.kube_config
   sensitive = true
 }
