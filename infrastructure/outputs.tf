@@ -11,4 +11,12 @@ output "aks_endpoint" {
     sensitive=true
 }
 
+output "resource_group_name" {
+  value = module.azure_vnet_1.resource_group_name
+}
+
+output "aks_cluster_name" {
+  value = module.azure_aks_1.cluster_name
+}
+
 
