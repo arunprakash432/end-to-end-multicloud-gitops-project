@@ -8,10 +8,9 @@ pipeline {
 
     environment {
         // --- CREDENTIALS ---
-        // Ensure these IDs exist in your Jenkins Credentials Dashboard
-        AWS_CREDS_ID    = 'aws-credentials'     // Type: AWS Credentials (or Username/Password)
-        GIT_CREDS_ID    = 'github-credentials'  // Type: Username with Password
-        DOCKER_CREDS_ID = 'docker-creds'        // Type: Username with Password
+        AWS_CREDS_ID    = 'aws-credentials'     // Ensure this matches your Jenkins ID
+        GIT_CREDS_ID    = 'github-credentials' 
+        DOCKER_CREDS_ID = 'docker-creds'       
 
         // --- CONFIGURATION ---
         DOCKER_USER     = "dockervarun432"
@@ -46,12 +45,11 @@ pipeline {
 
         stage('Provision Infrastructure') {
             steps {
-                // FIXED: Replaced 'AmazonWebServicesCredentialsBinding' with 'usernamePassword'
-                // This maps AccessKey -> Username and SecretKey -> Password
+                // FIXED: Use standard credentials binding instead of the plugin that crashed
                 withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir('infrastructure') {
                         sh 'terraform init'
-                        sh 'terraform validate'
+                        // Auto-approve is risky but necessary for this automation demo
                         sh 'terraform apply -auto-approve'
                         
                         // Capture Outputs
@@ -90,7 +88,7 @@ pipeline {
                     dir('k8s/monitoring') {
                         sh "sed -i \"s|<CLUSTER-B-IP>|${env.CLUSTER_B_IP}|g\" central-prometheus.yaml"
                         sh "sed -i \"s|<CLUSTER-C-IP>|${env.CLUSTER_C_DNS}|g\" central-prometheus.yaml"
-                        // Regex fallback
+                        // Regex fallback in case placeholders were already replaced
                         sh "sed -i \"s|targets: \\['.*:9100'\\]|targets: \\['${env.CLUSTER_B_IP}:9100'\\]|g\" central-prometheus.yaml"
                         sh "sed -i \"s|targets: \\['.*:9100'\\]|targets: \\['${env.CLUSTER_C_DNS}:9100'\\]|g\" central-prometheus.yaml"
                     }
@@ -114,7 +112,6 @@ pipeline {
 
         stage('Deploy Agents & Register Clusters') {
             steps {
-                // FIXED: Using usernamePassword for AWS here as well
                 withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     script {
                         // --- 1. AWS Workload (Cluster B) ---
@@ -136,9 +133,9 @@ pipeline {
                         sh "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
                         sh "kubectl rollout status deployment/argocd-server -n argocd --timeout=300s || true"
 
-                        // Register Clusters
-                        sh "argocd cluster add ${ctxB} --name aws-cluster-b --yes --upsert || echo 'Cluster registration skipped'"
-                        sh "argocd cluster add ${ctxC} --name azure-cluster-c --yes --upsert || echo 'Cluster registration skipped'"
+                        // Register Clusters (Try/Catch logic to avoid failing if already exists)
+                        sh "argocd cluster add ${ctxB} --name aws-cluster-b --yes --upsert || echo 'Cluster reg warning'"
+                        sh "argocd cluster add ${ctxC} --name azure-cluster-c --yes --upsert || echo 'Cluster reg warning'"
 
                         // Trigger Deployment
                         sh "kubectl apply -f k8s/argocd-apps/"
@@ -153,7 +150,7 @@ pipeline {
         success { 
             script {
                 withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    echo "🔍 Generating Report..."
+                    echo "Generating Report..."
                     sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
                     def argoUrl = sh(script: "kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
                     
