@@ -7,14 +7,10 @@ pipeline {
   }
 
   environment {
-    // Docker
     DOCKER_USER = "dockervarun432"
     IMAGE_NAME  = "python-webapp-flask"
+    GIT_BRANCH  = "main"
 
-    // Git
-    GIT_BRANCH = "main"
-
-    // AWS
     AWS_REGION     = "ap-south-1"
     CLUSTER_A_NAME = "eks-cluster-monitoring-1"
     CLUSTER_B_NAME = "aws-app-eks-2"
@@ -22,18 +18,12 @@ pipeline {
 
   stages {
 
-    /* ============================
-       CHECKOUT
-    ============================ */
     stage('Checkout Code') {
       steps {
         checkout scm
       }
     }
 
-    /* ============================
-       PREVENT GITOPS LOOP
-    ============================ */
     stage('Prevent GitOps Loop') {
       steps {
         script {
@@ -49,9 +39,6 @@ pipeline {
       }
     }
 
-    /* ============================
-       TERRAFORM
-    ============================ */
     stage('Provision Infrastructure') {
       steps {
         script {
@@ -83,9 +70,6 @@ pipeline {
       }
     }
 
-    /* ============================
-       DOCKER BUILD & PUSH
-    ============================ */
     stage('Build & Push Docker Image') {
       steps {
         script {
@@ -108,9 +92,6 @@ pipeline {
       }
     }
 
-    /* ============================
-       GITOPS UPDATE
-    ============================ */
     stage('GitOps: Update Manifests') {
       steps {
         script {
@@ -138,9 +119,6 @@ pipeline {
       }
     }
 
-    /* ============================
-       ARGOCD
-    ============================ */
     stage('ArgoCD Install & Sync') {
       steps {
         script {
@@ -159,24 +137,19 @@ pipeline {
       }
     }
 
-    /* ============================
-       MONITORING + URL CAPTURE
-    ============================ */
     stage('Monitoring Setup') {
       steps {
         script {
-          // -------- Cluster B Node Exporter --------
+          // ---- Cluster B Node Exporter ----
           sh """
             aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
             helm repo add grafana https://grafana.github.io/helm-charts || true
             helm repo update
 
-            helm upgrade --install prometheus prometheus-community/prometheus \
-            -f k8s/monitoring/central-prometheus.yaml
-
-            helm upgrade --install grafana grafana/grafana
-            
+            helm upgrade --install node-exporter \
+              prometheus-community/prometheus-node-exporter \
+              -f k8s/monitoring/node-exporter-values.yaml
           """
 
           sleep 60
@@ -186,16 +159,18 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          // -------- Central Prometheus + Grafana --------
+          // ---- Central Prometheus + Grafana ----
           sh """
             aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
             sed -i 's/<CLUSTER-B-IP>/${CLUSTER_B_METRICS}/' k8s/monitoring/central-prometheus.yaml
+
             helm upgrade --install prometheus prometheus-community/prometheus \
               -f k8s/monitoring/central-prometheus.yaml
-            helm upgrade --install grafana prometheus-community/grafana
+
+            helm upgrade --install grafana grafana/grafana
           """
 
-          // -------- Capture URLs --------
+          // ---- Capture URLs ----
           env.APP_B_URL = sh(
             script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
@@ -229,51 +204,45 @@ pipeline {
     }
   }
 
-  /* ============================
-     FINAL OUTPUT
-  ============================ */
   post {
     success {
       echo """
-            =================================================
-            ✅ PIPELINE COMPLETED SUCCESSFULLY
-            =================================================
+=================================================
+✅ PIPELINE COMPLETED SUCCESSFULLY
+=================================================
 
-            🚀 APPLICATION – CLUSTER B (AWS EKS)
-            http://${APP_B_URL}
+🚀 APPLICATION – CLUSTER B (AWS EKS)
+http://${APP_B_URL}
 
-            🚀 APPLICATION – CLUSTER C (AZURE AKS)
-            http://${APP_C_URL}
+🚀 APPLICATION – CLUSTER C (AZURE AKS)
+http://${APP_C_URL}
 
-            📦 ARGOCD
-            https://${ARGOCD_URL}:8081
-            Username: admin
-            Password:
-            kubectl -n argocd get secret argocd-initial-admin-secret \\
-            -o jsonpath="{.data.password}" | base64 -d
+📦 ARGOCD
+https://${ARGOCD_URL}:8081
+Username: admin
+Password:
+kubectl -n argocd get secret argocd-initial-admin-secret \\
+  -o jsonpath="{.data.password}" | base64 -d
 
-            📊 PROMETHEUS
-            http://${PROM_URL}:9090
-            Targets:
-            http://${PROM_URL}:9090/targets
+📊 PROMETHEUS
+http://${PROM_URL}:9090
+Targets:
+http://${PROM_URL}:9090/targets
 
-            📈 GRAFANA
-            http://${GRAFANA_URL}:3000
-            Username: admin
-            Password: admin
-            Dashboard ID: 1860 (Node Exporter Full)
+📈 GRAFANA
+http://${GRAFANA_URL}:3000
+Username: admin
+Password: admin
+Dashboard ID: 1860 (Node Exporter Full)
 
-            🟢 MONITORING TARGET
-            ${CLUSTER_B_METRICS}
-
-            =================================================
-            🎉 ALL SYSTEMS DEPLOYED & VERIFIED
-            =================================================
-            """
+=================================================
+🎉 ALL SYSTEMS DEPLOYED & VERIFIED
+=================================================
+"""
     }
 
     failure {
-      echo "❌ Pipeline failed — check Jenkins logs"
+      echo "❌ Pipeline failed — check logs"
     }
 
     always {
