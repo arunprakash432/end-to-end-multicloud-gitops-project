@@ -7,29 +7,31 @@ pipeline {
   }
 
   environment {
+    // Docker
     DOCKER_USER = "dockervarun432"
     IMAGE_NAME  = "python-webapp-flask"
     GIT_BRANCH  = "main"
 
-    AWS_REGION     = "ap-south-1"
-    CLUSTER_A_NAME = "eks-cluster-monitoring-1"
-    CLUSTER_B_NAME = "aws-app-eks-2"
+    // AWS
+    AWS_REGION = "ap-south-1"
+
+    // Clusters
+    CLUSTER_A_MONITORING = "eks-cluster-monitoring-1"
+    CLUSTER_B_AWS_APP    = "aws-app-eks-2"
+
+    // Azure
+    AZ_RESOURCE_GROUP = "rg-azure-app-vnet-1"
+    AKS_CLUSTER_NAME  = "azure-app-aks-1"
   }
 
   stages {
 
-    /* ============================
-       CHECKOUT
-    ============================ */
     stage('Checkout Code') {
       steps {
         checkout scm
       }
     }
 
-    /* ============================
-       PREVENT GITOPS LOOP
-    ============================ */
     stage('Prevent GitOps Loop') {
       steps {
         script {
@@ -45,43 +47,17 @@ pipeline {
       }
     }
 
-    /* ============================
-       TERRAFORM
-    ============================ */
     stage('Provision Infrastructure') {
       steps {
         script {
           dir('infrastructure') {
             sh 'terraform init'
             sh 'terraform apply -auto-approve'
-
-            env.CLUSTER_B_URL = sh(
-              script: "terraform output -raw eks2_endpoint",
-              returnStdout: true
-            ).trim()
-
-            env.CLUSTER_C_URL = sh(
-              script: "terraform output -raw aks_endpoint",
-              returnStdout: true
-            ).trim()
-
-            env.AZ_RG = sh(
-              script: "terraform output -raw resource_group_name",
-              returnStdout: true
-            ).trim()
-
-            env.AKS_NAME = sh(
-              script: "terraform output -raw aks_cluster_name",
-              returnStdout: true
-            ).trim()
           }
         }
       }
     }
 
-    /* ============================
-       DOCKER BUILD & PUSH
-    ============================ */
     stage('Build & Push Docker Image') {
       steps {
         script {
@@ -104,9 +80,6 @@ pipeline {
       }
     }
 
-    /* ============================
-       GITOPS UPDATE
-    ============================ */
     stage('GitOps: Update Manifests') {
       steps {
         script {
@@ -119,8 +92,6 @@ pipeline {
           ]) {
             sh """
               sed -i 's/tag: .*/tag: "${BUILD_NUMBER}"/' k8s/helm-charts/python-app/values.yaml
-              sed -i 's|server:.*|server: "${CLUSTER_B_URL}"|' k8s/argocd-apps/app-cluster-b.yaml
-              sed -i 's|server:.*|server: "${CLUSTER_C_URL}"|' k8s/argocd-apps/app-cluster-c.yaml
 
               git checkout ${GIT_BRANCH}
               git config user.name "jenkins-bot"
@@ -134,39 +105,31 @@ pipeline {
       }
     }
 
-    /* ============================
-       ARGOCD
-    ============================ */
     stage('ArgoCD Install & Sync') {
       steps {
         script {
           sh """
-            aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
-            aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
-            az aks get-credentials --resource-group ${AZ_RG} --name ${AKS_NAME} --overwrite-existing
+            aws eks update-kubeconfig --name ${CLUSTER_A_MONITORING} --region ${AWS_REGION}
 
             kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-            kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-            kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+            kubectl apply -n argocd \
+              -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
+            kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
             kubectl apply -f k8s/argocd-apps/
           """
         }
       }
     }
 
-    /* ============================
-       MONITORING + URL CAPTURE
-    ============================ */
     stage('Monitoring Setup') {
       steps {
         script {
-          /* ---- Node Exporter (Cluster B) ---- */
+          // ---- Node Exporter on AWS App Cluster ----
           sh """
-            aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
+            aws eks update-kubeconfig --name ${CLUSTER_B_AWS_APP} --region ${AWS_REGION}
 
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
-            helm repo add grafana https://grafana.github.io/helm-charts || true
             helm repo update
 
             helm upgrade --install node-exporter \
@@ -181,9 +144,12 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          /* ---- Central Prometheus + Grafana (Cluster A) ---- */
+          // ---- Central Prometheus + Grafana on Monitoring Cluster ----
           sh """
-            aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
+            aws eks update-kubeconfig --name ${CLUSTER_A_MONITORING} --region ${AWS_REGION}
+
+            helm repo add grafana https://grafana.github.io/helm-charts || true
+            helm repo update
 
             sed -i 's/<CLUSTER-B-IP>/${CLUSTER_B_METRICS}/' k8s/monitoring/central-prometheus.yaml
 
@@ -191,29 +157,33 @@ pipeline {
               prometheus-community/prometheus \
               -f k8s/monitoring/central-prometheus.yaml
 
-            helm upgrade --install grafana grafana/grafana
+            helm upgrade --install grafana grafana/grafana \
+              --set service.type=LoadBalancer
           """
+        }
+      }
+    }
 
-          /* ---- Application URLs ---- */
+    stage('Collect Browser URLs') {
+      steps {
+        script {
+          // ---- AWS App ----
+          sh "aws eks update-kubeconfig --name ${CLUSTER_B_AWS_APP} --region ${AWS_REGION}"
           env.APP_B_URL = sh(
-            script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'",
+            script: "kubectl get svc python-webapp-flask -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
           ).trim()
 
-          sh "az aks get-credentials --resource-group ${AZ_RG} --name ${AKS_NAME} --overwrite-existing"
-
+          // ---- Azure App ----
+          sh "az aks get-credentials --resource-group ${AZ_RESOURCE_GROUP} --name ${AKS_CLUSTER_NAME} --overwrite-existing"
+          sleep 60
           env.APP_C_URL = sh(
-            script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'",
+            script: "kubectl get svc python-webapp-flask -o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
             returnStdout: true
           ).trim()
 
-          sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
-
-          /* ---- Tool URLs (DEFAULT namespace) ---- */
-          env.ARGOCD_URL = sh(
-            script: "kubectl -n argocd get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
-            returnStdout: true
-          ).trim()
+          // ---- Monitoring URLs ----
+          sh "aws eks update-kubeconfig --name ${CLUSTER_A_MONITORING} --region ${AWS_REGION}"
 
           env.PROM_URL = sh(
             script: "kubectl get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
@@ -229,9 +199,6 @@ pipeline {
     }
   }
 
-  /* ============================
-     FINAL OUTPUT
-  ============================ */
   post {
     success {
       echo """
@@ -239,38 +206,25 @@ pipeline {
 ✅ PIPELINE COMPLETED SUCCESSFULLY
 =================================================
 
-🚀 APPLICATION – CLUSTER B (AWS EKS)
+🚀 APPLICATION – AWS EKS
 http://${APP_B_URL}
 
-🚀 APPLICATION – CLUSTER C (AZURE AKS)
+🚀 APPLICATION – AZURE AKS
 http://${APP_C_URL}
 
-📦 ARGOCD
-https://${ARGOCD_URL}:8081
-Username: admin
-Password:
-kubectl -n argocd get secret argocd-initial-admin-secret \\
-  -o jsonpath="{.data.password}" | base64 -d
-
-📊 PROMETHEUS
-http://${PROM_URL}:80
+📊 PROMETHEUS (CENTRAL)
+http://${PROM_URL}
 
 📈 GRAFANA
-http://${GRAFANA_URL}:80
+http://${GRAFANA_URL}
 Username: admin
 Password: admin
-Dashboard ID: 1860 (Node Exporter Full)
 
 =================================================
-🎉 ALL SYSTEMS DEPLOYED & VERIFIED
+🎉 MULTI-CLOUD GITOPS PIPELINE VERIFIED
 =================================================
 """
     }
-
-    failure {
-      echo "❌ Pipeline failed — check Jenkins logs"
-    }
-
     always {
       cleanWs()
     }
