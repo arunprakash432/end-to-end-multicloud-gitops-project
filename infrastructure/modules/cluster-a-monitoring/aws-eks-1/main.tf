@@ -56,5 +56,5 @@ resource "aws_eks_node_group" "ng" {
         }
 
 
-    instance_types = ["t3.small"]
+    instance_types = ["c7i-flex.large"]
 }
