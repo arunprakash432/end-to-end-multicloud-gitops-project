@@ -196,7 +196,7 @@ pipeline {
           ).trim()
 
           env.GRAFANA_URL = sh(
-            script: "kubectl -n monitoring get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            script: "kubectl get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
           ).trim()
         }
