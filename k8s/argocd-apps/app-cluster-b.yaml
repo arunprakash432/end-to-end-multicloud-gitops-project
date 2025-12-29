@@ -1,18 +1,20 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: python-webapp-cluster-b
+  name: python-app-cluster-b
   namespace: argocd
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/arunprakash432/end-to-end-multicloud-gitops-project.git' # UPDATE THIS
-    targetRevision: main
-    path: helm-charts/python-webapp
+    repoURL: 'https://github.com/arunprakash432/end-to-end-multicloud-gitops-project.git'
+    targetRevision: HEAD
+    path: k8s/helm-charts/python-app
   destination:
-    # This URL must match the cluster URL registered in ArgoCD for Cluster B
-    server: 'https://<CLUSTER-B-API-URL>' 
+    # REMOVE 'server: https://...'
+    # ADD 'name' with a fixed logical name
+    name: aws-app-cluster
     namespace: default
+  # ENABLE AUTO-SYNC
   syncPolicy:
     automated:
       prune: true
