@@ -18,12 +18,18 @@ pipeline {
 
   stages {
 
+    /* ============================
+       CHECKOUT
+    ============================ */
     stage('Checkout Code') {
       steps {
         checkout scm
       }
     }
 
+    /* ============================
+       PREVENT GITOPS LOOP
+    ============================ */
     stage('Prevent GitOps Loop') {
       steps {
         script {
@@ -39,6 +45,9 @@ pipeline {
       }
     }
 
+    /* ============================
+       TERRAFORM
+    ============================ */
     stage('Provision Infrastructure') {
       steps {
         script {
@@ -70,6 +79,9 @@ pipeline {
       }
     }
 
+    /* ============================
+       DOCKER BUILD & PUSH
+    ============================ */
     stage('Build & Push Docker Image') {
       steps {
         script {
@@ -92,6 +104,9 @@ pipeline {
       }
     }
 
+    /* ============================
+       GITOPS UPDATE
+    ============================ */
     stage('GitOps: Update Manifests') {
       steps {
         script {
@@ -119,6 +134,9 @@ pipeline {
       }
     }
 
+    /* ============================
+       ARGOCD
+    ============================ */
     stage('ArgoCD Install & Sync') {
       steps {
         script {
@@ -137,12 +155,16 @@ pipeline {
       }
     }
 
+    /* ============================
+       MONITORING + URL CAPTURE
+    ============================ */
     stage('Monitoring Setup') {
       steps {
         script {
-          // ---- Cluster B Node Exporter ----
+          /* ---- Node Exporter (Cluster B) ---- */
           sh """
             aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
+
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
             helm repo add grafana https://grafana.github.io/helm-charts || true
             helm repo update
@@ -159,18 +181,20 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          // ---- Central Prometheus + Grafana ----
+          /* ---- Central Prometheus + Grafana (Cluster A) ---- */
           sh """
             aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
+
             sed -i 's/<CLUSTER-B-IP>/${CLUSTER_B_METRICS}/' k8s/monitoring/central-prometheus.yaml
 
-            helm upgrade --install prometheus prometheus-community/prometheus \
+            helm upgrade --install prometheus \
+              prometheus-community/prometheus \
               -f k8s/monitoring/central-prometheus.yaml
 
             helm upgrade --install grafana grafana/grafana
           """
 
-          // ---- Capture URLs ----
+          /* ---- Application URLs ---- */
           env.APP_B_URL = sh(
             script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
@@ -185,13 +209,14 @@ pipeline {
 
           sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
 
+          /* ---- Tool URLs (DEFAULT namespace) ---- */
           env.ARGOCD_URL = sh(
             script: "kubectl -n argocd get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
           ).trim()
 
           env.PROM_URL = sh(
-            script: "kubectl -n monitoring get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            script: "kubectl get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
             returnStdout: true
           ).trim()
 
@@ -204,6 +229,9 @@ pipeline {
     }
   }
 
+  /* ============================
+     FINAL OUTPUT
+  ============================ */
   post {
     success {
       echo """
@@ -225,12 +253,10 @@ kubectl -n argocd get secret argocd-initial-admin-secret \\
   -o jsonpath="{.data.password}" | base64 -d
 
 📊 PROMETHEUS
-http://${PROM_URL}:9090
-Targets:
-http://${PROM_URL}:9090/targets
+http://${PROM_URL}:80
 
 📈 GRAFANA
-http://${GRAFANA_URL}:3000
+http://${GRAFANA_URL}:80
 Username: admin
 Password: admin
 Dashboard ID: 1860 (Node Exporter Full)
@@ -242,7 +268,7 @@ Dashboard ID: 1860 (Node Exporter Full)
     }
 
     failure {
-      echo "❌ Pipeline failed — check logs"
+      echo "❌ Pipeline failed — check Jenkins logs"
     }
 
     always {
