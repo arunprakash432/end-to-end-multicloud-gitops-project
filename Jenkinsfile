@@ -126,7 +126,7 @@ pipeline {
                     sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
                     
                     echo "⏳ Waiting for AWS DNS..."
-                    sleep 90
+                    sleep 30
                     def B_DNS = sh(script: "kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
                     // 2. Cluster C (Azure) Node Exporter
@@ -134,7 +134,7 @@ pipeline {
                     sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
                     
                     echo "⏳ Waiting for Azure IP..."
-                    sleep 60
+                    sleep 30
                     def C_IP = sh(script: "kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath='{.status.loadBalancer.ingress[0].ip}'", returnStdout: true).trim()
 
                     // 3. Central Cluster (Prometheus & Grafana)
@@ -177,17 +177,36 @@ pipeline {
 
                 // --- 2. Fetch Application URLs (AWS Cluster B) ---
                 sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
-                // Wait briefly for ArgoCD to deploy the app
-                echo "⏳ Waiting for AWS App LoadBalancer..."
-                sleep 60 
-                // We assume the app service name is 'python-app-service' based on standard helm charts, adjust if different
-                def awsAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Pending'", returnStdout: true).trim()
+                
+                echo "⏳ Waiting for AWS Application to be deployed by ArgoCD..."
+                // Loop to wait for service creation
+                sh """
+                    timeout=300
+                    elapsed=0
+                    while ! kubectl get svc python-app-service >/dev/null 2>&1; do
+                        echo "Waiting for python-app-service on AWS..."
+                        sleep 10
+                        elapsed=\$((elapsed+10))
+                        if [ \$elapsed -ge \$timeout ]; then echo "Timeout waiting for AWS app"; break; fi
+                    done
+                """
+                def awsAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Not-Found'", returnStdout: true).trim()
 
                 // --- 3. Fetch Application URLs (Azure Cluster C) ---
                 sh "az aks get-credentials --resource-group ${env.REAL_AZURE_RG} --name ${env.REAL_AKS_NAME}"
-                echo "⏳ Waiting for Azure App LoadBalancer..."
-                sleep 30
-                def azureAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo 'Pending'", returnStdout: true).trim()
+                
+                echo "⏳ Waiting for Azure Application to be deployed by ArgoCD..."
+                sh """
+                    timeout=300
+                    elapsed=0
+                    while ! kubectl get svc python-app-service >/dev/null 2>&1; do
+                        echo "Waiting for python-app-service on Azure..."
+                        sleep 10
+                        elapsed=\$((elapsed+10))
+                        if [ \$elapsed -ge \$timeout ]; then echo "Timeout waiting for Azure app"; break; fi
+                    done
+                """
+                def azureAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo 'Not-Found'", returnStdout: true).trim()
 
                 echo """
                 ==========================================================
