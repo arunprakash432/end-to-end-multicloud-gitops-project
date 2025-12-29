@@ -1,22 +1,13 @@
+# k8s/monitoring/central-prometheus.yaml
+
+global:
+  scrape_interval: 15s
+
 server:
-  global:
-    scrape_interval: 15s
   service:
     type: LoadBalancer
     port: 9090
 
-  extraScrapeConfigs: |
-    - job_name: 'cluster-b-metrics'
-      scrape_interval: 15s
-      static_configs:
-        - targets: ['<CLUSTER-B-IP>:9100']
-
-    - job_name: 'cluster-c-metrics'
-      scrape_interval: 15s
-      static_configs:
-        - targets: ['<CLUSTER-C-IP>:9100']
-
-        server:
   persistentVolume:
     enabled: false
 
@@ -27,3 +18,21 @@ server:
     limits:
       cpu: 300m
       memory: 512Mi
+
+alertmanager:
+  enabled: true
+  persistentVolume:
+    enabled: false
+
+extraScrapeConfigs: |
+  - job_name: 'cluster-b-metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - '<CLUSTER-B-IP>:9100'
+
+  - job_name: 'cluster-c-metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - '<CLUSTER-C-IP>:9100'
