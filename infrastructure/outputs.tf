@@ -3,8 +3,10 @@ output "eks2_endpoint" {
 }
 
 output "aks_endpoint" {
-  value = module.azure_aks_1.kube_config[0].host
+  value     = module.azure_aks_1.kube_config[0].host
+  sensitive = true
 }
+
 
 output "resource_group_name" {
   value = module.azure_vnet_1.resource_group_name
