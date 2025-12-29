@@ -13,8 +13,8 @@ pipeline {
         GIT_BRANCH  = "main"
         
         AWS_REGION      = "ap-south-1"
-        CLUSTER_A_NAME  = "eks-cluster-monitoring-1" // Central Monitoring Cluster
-        CLUSTER_B_NAME  = "aws-app-eks-2"            // Application Cluster (AWS)
+        CLUSTER_A_NAME  = "eks-cluster-monitoring-1" // Central Monitoring
+        CLUSTER_B_NAME  = "aws-app-eks-2"            // AWS App Cluster
     }
 
     stages {
@@ -39,13 +39,11 @@ pipeline {
                     sh 'terraform init'
                     sh 'terraform apply -auto-approve'
                     script {
-                        // Capture Cloud Outputs for use in later stages
+                        // Capture Cloud Outputs
                         env.REAL_AZURE_RG = sh(script: "terraform output -raw resource_group_name", returnStdout: true).trim()
                         env.REAL_AKS_NAME = sh(script: "terraform output -raw aks_cluster_name", returnStdout: true).trim()
-                        
-                        // We also capture endpoints if needed for monitoring config, though logical names handle deployment
-                        env.CLUSTER_B_ENDPOINT = sh(script: "terraform output -raw eks2_endpoint", returnStdout: true).trim()
-                        env.CLUSTER_C_ENDPOINT = sh(script: "terraform output -raw aks_endpoint", returnStdout: true).trim()
+                        env.CLUSTER_B_URL = sh(script: "terraform output -raw eks2_endpoint", returnStdout: true).trim()
+                        env.CLUSTER_C_URL = sh(script: "terraform output -raw aks_endpoint", returnStdout: true).trim()
                     }
                 }
             }
@@ -67,8 +65,7 @@ pipeline {
 
         stage('GitOps Update') {
             steps {
-                // Update ONLY the image tag. 
-                // We do NOT update the server URL anymore because we use Fixed Logical Names.
+                // Only update the Image Tag. Cluster mapping is handled by Logical Names.
                 sh "sed -i 's/tag: .*/tag: \"${DOCKER_TAG}\"/' k8s/helm-charts/python-app/values.yaml"
 
                 withCredentials([usernamePassword(credentialsId: 'git-creds', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
@@ -87,35 +84,28 @@ pipeline {
         stage('ArgoCD Setup') {
             steps {
                 sh """
-                    # 1. Update Kubeconfigs for all clusters
+                    # 1. Update Kubeconfigs
                     aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
                     aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
                     az aks get-credentials --resource-group "${env.REAL_AZURE_RG}" --name "${env.REAL_AKS_NAME}" --overwrite-existing
                     
-                    # 2. Switch to Monitoring Cluster (where ArgoCD runs)
+                    # 2. Switch to Monitoring Cluster
                     kubectl config use-context \$(kubectl config get-contexts -o name | grep ${CLUSTER_A_NAME})
-                    
-                    # --- FIX 1: Explicitly set namespace to argocd ---
                     kubectl config set-context --current --namespace=argocd
 
                     # 3. Install ArgoCD
                     kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
                     kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
                     
-                    # 4. Expose ArgoCD via LoadBalancer
+                    # 4. Expose ArgoCD
                     kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
                     kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
 
-                    # 5. Register Clusters with FIXED LOGICAL NAMES
-                    # This allows your YAML files in Git to be static (destination: name: aws-app-cluster)
-                    
-                    # Register AWS App Cluster
+                    # 5. Register Clusters (Using Fixed Logical Names)
                     argocd cluster add \$(kubectl config get-contexts -o name | grep ${CLUSTER_B_NAME}) --name aws-app-cluster --yes --upsert --core
-                    
-                    # Register Azure App Cluster
                     argocd cluster add \$(kubectl config get-contexts -o name | grep ${env.REAL_AKS_NAME}) --name azure-app-cluster --yes --upsert --core
 
-                    # 6. Apply ArgoCD Applications
+                    # 6. Apply ArgoCD Apps
                     kubectl apply -f k8s/argocd-apps/
                 """
             }
@@ -124,42 +114,52 @@ pipeline {
         stage('Monitoring Setup') {
             steps {
                 script {
-                    // 1. AWS Cluster Monitoring (Cluster B)
+                    // --- 1. AWS Cluster Node Exporter ---
                     sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
                     sh "helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true"
                     sh "helm repo update"
                     sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
                     
-                    // Wait for AWS Node Exporter LoadBalancer
-                    sleep 30
+                    echo "⏳ Waiting for AWS Node Exporter LoadBalancer..."
+                    sh "timeout 300s bash -c 'until kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath=\"{.status.loadBalancer.ingress[0].hostname}\" > /dev/null 2>&1; do sleep 10; done'"
                     def B_DNS = sh(script: "kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
-                    // 2. Azure Cluster Monitoring (Cluster C)
+                    // --- 2. Azure Cluster Node Exporter ---
                     sh "az aks get-credentials --resource-group ${env.REAL_AZURE_RG} --name ${env.REAL_AKS_NAME}"
                     sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
                     
-                    // Wait for Azure Node Exporter IP
-                    sleep 30
+                    echo "⏳ Waiting for Azure Node Exporter IP..."
+                    sh "timeout 300s bash -c 'until kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath=\"{.status.loadBalancer.ingress[0].ip}\" > /dev/null 2>&1; do sleep 10; done'"
                     def C_IP = sh(script: "kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath='{.status.loadBalancer.ingress[0].ip}'", returnStdout: true).trim()
 
-                    // 3. Central Monitoring (Cluster A)
+                    // --- 3. Central Monitoring (Grafana/Prometheus) ---
                     sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
-                    
-                    // --- FIX 2: Add Grafana Repo ---
                     sh "helm repo add grafana https://grafana.github.io/helm-charts || true"
                     sh "helm repo update"
-                    
-                    dir('k8s/monitoring') {
-                        // Update central prometheus config with the new Node Exporter IPs/DNS
-                        sh "sed -i 's/<CLUSTER-B-IP>/${B_DNS}/g' central-prometheus.yaml"
-                        sh "sed -i 's/<CLUSTER-C-IP>/${C_IP}/g' central-prometheus.yaml"
 
-                        // Install Prometheus
-                        sh "helm upgrade --install prometheus prometheus-community/prometheus -f central-prometheus.yaml"
-                        
-                        // Install Grafana (using correct chart)
-                        sh "helm upgrade --install grafana grafana/grafana --set service.type=LoadBalancer --set adminPassword=admin"
-                    }
+                    // DYNAMICALLY GENERATE PROMETHEUS CONFIG
+                    // This ensures we always have the FRESH IPs and fixes the "sed" error.
+                    def promValues = """
+extraScrapeConfigs: |
+  - job_name: 'aws-node-exporter'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['${B_DNS}:9100']
+  - job_name: 'azure-node-exporter'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['${C_IP}:9100']
+server:
+  service:
+    type: LoadBalancer
+"""
+                    writeFile file: 'k8s/monitoring/central-prometheus-generated.yaml', text: promValues
+
+                    // Install Prometheus using the GENERATED file
+                    sh "helm upgrade --install prometheus prometheus-community/prometheus -f k8s/monitoring/central-prometheus-generated.yaml"
+                    
+                    // Install Grafana
+                    sh "helm upgrade --install grafana grafana/grafana --set service.type=LoadBalancer --set adminPassword=admin"
                 }
             }
         }
@@ -176,18 +176,18 @@ pipeline {
                 def promUrl = sh(script: "kubectl get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
                 def grafUrl = sh(script: "kubectl get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
-                // --- 2. Fetch AWS App URL (Cluster B) with Retry Logic ---
+                // --- 2. Fetch App URLs (Wait for them to appear) ---
+                
+                // AWS App
                 sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
-                echo "⏳ Waiting for AWS App LoadBalancer..."
-                // Loop until the service exists and has a hostname
-                sh "timeout 300s bash -c 'until kubectl get svc python-app-service -o jsonpath=\"{.status.loadBalancer.ingress[0].hostname}\" > /dev/null 2>&1; do echo waiting for AWS LB...; sleep 10; done'"
+                echo "⏳ Waiting for AWS App Deployment..."
+                sh "timeout 300s bash -c 'until kubectl get svc python-app-service -o jsonpath=\"{.status.loadBalancer.ingress[0].hostname}\" > /dev/null 2>&1; do echo waiting for AWS app...; sleep 10; done'"
                 def awsAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
-                // --- 3. Fetch Azure App URL (Cluster C) with Retry Logic ---
+                // Azure App
                 sh "az aks get-credentials --resource-group ${env.REAL_AZURE_RG} --name ${env.REAL_AKS_NAME}"
-                echo "⏳ Waiting for Azure App LoadBalancer..."
-                // Loop until the service exists and has an IP
-                sh "timeout 300s bash -c 'until kubectl get svc python-app-service -o jsonpath=\"{.status.loadBalancer.ingress[0].ip}\" > /dev/null 2>&1; do echo waiting for Azure LB...; sleep 10; done'"
+                echo "⏳ Waiting for Azure App Deployment..."
+                sh "timeout 300s bash -c 'until kubectl get svc python-app-service -o jsonpath=\"{.status.loadBalancer.ingress[0].ip}\" > /dev/null 2>&1; do echo waiting for Azure app...; sleep 10; done'"
                 def azureAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}'", returnStdout: true).trim()
 
                 echo """
