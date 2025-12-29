@@ -15,3 +15,15 @@ server:
       scrape_interval: 15s
       static_configs:
         - targets: ['<CLUSTER-C-IP>:9100']
+
+        server:
+  persistentVolume:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
