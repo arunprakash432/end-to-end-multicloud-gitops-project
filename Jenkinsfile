@@ -176,7 +176,7 @@ pipeline {
             -f k8s/monitoring/central-prometheus.yaml
 
             helm upgrade --install grafana grafana/grafana
-
+            
           """
 
           sleep 60
