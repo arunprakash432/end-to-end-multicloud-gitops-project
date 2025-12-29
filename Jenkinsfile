@@ -1,183 +1,278 @@
 pipeline {
-    agent any
+  agent any
 
-    options {
-        timeout(time: 1, unit: 'HOURS')
-        disableConcurrentBuilds()
+  options {
+    disableConcurrentBuilds()
+    timeout(time: 1, unit: 'HOURS')
+  }
+
+  environment {
+    // Docker
+    DOCKER_USER = "dockervarun432"
+    IMAGE_NAME  = "python-webapp-flask"
+
+    // Git
+    GIT_BRANCH = "main"
+
+    // AWS
+    AWS_REGION     = "ap-south-1"
+    CLUSTER_A_NAME = "eks-cluster-monitoring-1"
+    CLUSTER_B_NAME = "aws-app-eks-2"
+  }
+
+  stages {
+
+    /* ============================
+       CHECKOUT
+    ============================ */
+    stage('Checkout Code') {
+      steps {
+        checkout scm
+      }
     }
 
-    environment {
-        // --- CREDENTIALS ---
-        AWS_CREDS_ID    = 'aws-credentials'     // Ensure this matches your Jenkins ID
-        GIT_CREDS_ID    = 'github-credentials' 
-        DOCKER_CREDS_ID = 'docker-creds'       
+    /* ============================
+       PREVENT GITOPS LOOP
+    ============================ */
+    stage('Prevent GitOps Loop') {
+      steps {
+        script {
+          def author = sh(
+            script: "git log -1 --pretty=%an",
+            returnStdout: true
+          ).trim()
 
-        // --- CONFIGURATION ---
-        DOCKER_USER     = "dockervarun432"
-        IMAGE_NAME      = "python-webapp-flask"
-        DOCKER_TAG      = "${BUILD_NUMBER}"
-        REPO_URL        = "github.com/arunprakash432/end-to-end-multicloud-gitops-project.git"
-        GIT_BRANCH      = "main"
-
-        // --- CLUSTERS ---
-        AWS_REGION      = "ap-south-1"
-        CLUSTER_A_NAME  = "eks-cluster-monitoring-1"
-        CLUSTER_B_NAME  = "aws-app-eks-2"
+          if (author.toLowerCase().contains("jenkins")) {
+            error("Stopping pipeline to prevent GitOps loop")
+          }
+        }
+      }
     }
 
-    stages {
-        stage('Checkout & Setup') {
-            steps {
-                checkout scm
-            }
+    /* ============================
+       TERRAFORM
+    ============================ */
+    stage('Provision Infrastructure') {
+      steps {
+        dir('infrastructure') {
+          sh 'terraform init'
+          sh 'terraform apply -auto-approve'
+
+          env.CLUSTER_B_URL = sh(
+            script: "terraform output -raw eks2_endpoint",
+            returnStdout: true
+          ).trim()
+
+          env.CLUSTER_C_URL = sh(
+            script: "terraform output -raw aks_endpoint",
+            returnStdout: true
+          ).trim()
+
+          env.AZ_RG = sh(
+            script: "terraform output -raw resource_group_name",
+            returnStdout: true
+          ).trim()
+
+          env.AKS_NAME = sh(
+            script: "terraform output -raw aks_cluster_name",
+            returnStdout: true
+          ).trim()
         }
-
-        stage('Prevent GitOps Loop') {
-            steps {
-                script {
-                    def author = sh(script: "git log -1 --pretty=%an", returnStdout: true).trim()
-                    if (author.contains("Jenkins Bot")) {
-                        error("🛑 Aborting: Commit by Jenkins Bot. Stopping GitOps loop.")
-                    }
-                }
-            }
-        }
-
-        stage('Provision Infrastructure') {
-            steps {
-                // FIXED: Use standard credentials binding instead of the plugin that crashed
-                withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('infrastructure') {
-                        sh 'terraform init'
-                        // Auto-approve is risky but necessary for this automation demo
-                        sh 'terraform apply -auto-approve'
-                        
-                        // Capture Outputs
-                        script {
-                            env.CLUSTER_B_IP   = sh(script: "terraform output -raw cluster_b_public_ip", returnStdout: true).trim()
-                            env.CLUSTER_C_DNS  = sh(script: "terraform output -raw cluster_c_loadbalancer_dns", returnStdout: true).trim()
-                            env.AZURE_RG       = sh(script: "terraform output -raw aks_resource_group", returnStdout: true).trim()
-                            env.AZURE_AKS_NAME = sh(script: "terraform output -raw aks_cluster_name", returnStdout: true).trim()
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Build & Push Docker') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDS_ID, usernameVariable: 'DUSER', passwordVariable: 'DPASS')]) {
-                    sh """
-                        echo "$DPASS" | docker login -u "$DUSER" --password-stdin
-                        docker build -t ${DOCKER_USER}/${IMAGE_NAME}:${DOCKER_TAG} ./app
-                        docker push ${DOCKER_USER}/${IMAGE_NAME}:${DOCKER_TAG}
-                        docker tag ${DOCKER_USER}/${IMAGE_NAME}:${DOCKER_TAG} ${DOCKER_USER}/${IMAGE_NAME}:latest
-                        docker push ${DOCKER_USER}/${IMAGE_NAME}:latest
-                    """
-                }
-            }
-        }
-
-        stage('GitOps: Update Code') {
-            steps {
-                script {
-                    // 1. Update Application Tag
-                    sh "sed -i 's/tag: .*/tag: \"${DOCKER_TAG}\"/' k8s/helm-charts/python-app/values.yaml"
-
-                    // 2. Update Monitoring IPs
-                    dir('k8s/monitoring') {
-                        sh "sed -i \"s|<CLUSTER-B-IP>|${env.CLUSTER_B_IP}|g\" central-prometheus.yaml"
-                        sh "sed -i \"s|<CLUSTER-C-IP>|${env.CLUSTER_C_DNS}|g\" central-prometheus.yaml"
-                        // Regex fallback in case placeholders were already replaced
-                        sh "sed -i \"s|targets: \\['.*:9100'\\]|targets: \\['${env.CLUSTER_B_IP}:9100'\\]|g\" central-prometheus.yaml"
-                        sh "sed -i \"s|targets: \\['.*:9100'\\]|targets: \\['${env.CLUSTER_C_DNS}:9100'\\]|g\" central-prometheus.yaml"
-                    }
-                }
-
-                withCredentials([usernamePassword(credentialsId: env.GIT_CREDS_ID, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                    sh """
-                        git config user.name "Jenkins Bot"
-                        git config user.email "jenkins@ci.local"
-                        git add .
-                        if ! git diff-index --quiet HEAD; then
-                             git commit -m "GitOps: Update App to ${DOCKER_TAG} & Monitor IPs [skip ci]"
-                             git push https://${GIT_USER}:${GIT_PASS}@${REPO_URL} ${GIT_BRANCH}
-                        else
-                             echo "No changes to commit."
-                        fi
-                    """
-                }
-            }
-        }
-
-        stage('Deploy Agents & Register Clusters') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    script {
-                        // --- 1. AWS Workload (Cluster B) ---
-                        sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
-                        sh "helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true"
-                        sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
-                        def ctxB = sh(script: "kubectl config current-context", returnStdout: true).trim()
-
-                        // --- 2. Azure Workload (Cluster C) ---
-                        sh "az aks get-credentials --resource-group ${env.AZURE_RG} --name ${env.AZURE_AKS_NAME} --overwrite-existing"
-                        sh "helm upgrade --install node-exporter prometheus-community/prometheus-node-exporter -f k8s/monitoring/node-exporter-values.yaml"
-                        def ctxC = sh(script: "kubectl config current-context", returnStdout: true).trim()
-
-                        // --- 3. Management Cluster (Cluster A) ---
-                        sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
-                        
-                        // Install ArgoCD
-                        sh "kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -"
-                        sh "kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
-                        sh "kubectl rollout status deployment/argocd-server -n argocd --timeout=300s || true"
-
-                        // Register Clusters (Try/Catch logic to avoid failing if already exists)
-                        sh "argocd cluster add ${ctxB} --name aws-cluster-b --yes --upsert || echo 'Cluster reg warning'"
-                        sh "argocd cluster add ${ctxC} --name azure-cluster-c --yes --upsert || echo 'Cluster reg warning'"
-
-                        // Trigger Deployment
-                        sh "kubectl apply -f k8s/argocd-apps/"
-                    }
-                }
-            }
-        }
+      }
     }
 
-    post {
-        always { cleanWs() }
-        success { 
-            script {
-                withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    echo "Generating Report..."
-                    sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
-                    def argoUrl = sh(script: "kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
-                    
-                    def grafUrl = sh(script: "kubectl get svc grafana -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Pending'", returnStdout: true).trim()
-                    def promUrl = sh(script: "kubectl get svc prometheus-server -n monitoring -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Pending'", returnStdout: true).trim()
-
-                    sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
-                    def awsAppUrl = sh(script: "kubectl get svc python-webapp-flask -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Pending'", returnStdout: true).trim()
-
-                    sh "az aks get-credentials --resource-group ${env.AZURE_RG} --name ${env.AZURE_AKS_NAME} --overwrite-existing"
-                    def azureAppUrl = sh(script: "kubectl get svc python-webapp-flask -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo 'Pending'", returnStdout: true).trim()
-
-                    echo """
-                    ==========================================================
-                    ✅ DEPLOYMENT SUCCESSFUL
-                    ==========================================================
-                    🚀 ArgoCD UI:      https://${argoUrl}
-                    📊 Grafana UI:     http://${grafUrl} (admin/admin)
-                    📈 Prometheus UI:  http://${promUrl}
-                    
-                    📱 APPLICATIONS
-                    ☁️  AWS App:       http://${awsAppUrl}
-                    ☁️  Azure App:     http://${azureAppUrl}
-                    ==========================================================
-                    """
-                }
-            }
+    /* ============================
+       DOCKER BUILD & PUSH
+    ============================ */
+    stage('Build & Push Docker Image') {
+      steps {
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'docker-creds',
+            usernameVariable: 'DUSER',
+            passwordVariable: 'DPASS'
+          )
+        ]) {
+          sh """
+            docker login -u ${DUSER} -p ${DPASS}
+            docker build -t ${DOCKER_USER}/${IMAGE_NAME}:${BUILD_NUMBER} ./app
+            docker tag ${DOCKER_USER}/${IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_USER}/${IMAGE_NAME}:latest
+            docker push ${DOCKER_USER}/${IMAGE_NAME}:${BUILD_NUMBER}
+            docker push ${DOCKER_USER}/${IMAGE_NAME}:latest
+          """
         }
+      }
     }
+
+    /* ============================
+       GITOPS UPDATE
+    ============================ */
+    stage('GitOps: Update Manifests') {
+      steps {
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'git-creds',
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_PASS'
+          )
+        ]) {
+          sh """
+            sed -i 's/tag: .*/tag: "${BUILD_NUMBER}"/' k8s/helm-charts/python-app/values.yaml
+            sed -i 's|server:.*|server: "${CLUSTER_B_URL}"|' k8s/argocd-apps/app-cluster-b.yaml
+            sed -i 's|server:.*|server: "${CLUSTER_C_URL}"|' k8s/argocd-apps/app-cluster-c.yaml
+
+            git checkout ${GIT_BRANCH}
+            git config user.name "jenkins-bot"
+            git config user.email "jenkins@ci.local"
+            git add k8s/
+            git commit -m "CI: Update image ${BUILD_NUMBER} [skip ci]" || true
+            git push https://${GIT_USER}:${GIT_PASS}@github.com/arunprakash432/end-to-end-multicloud-gitops-project.git ${GIT_BRANCH}
+          """
+        }
+      }
+    }
+
+    /* ============================
+       ARGOCD
+    ============================ */
+    stage('ArgoCD Install & Sync') {
+      steps {
+        sh """
+          aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
+          aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
+          az aks get-credentials --resource-group ${AZ_RG} --name ${AKS_NAME} --overwrite-existing
+
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+
+          kubectl apply -f k8s/argocd-apps/
+        """
+      }
+    }
+
+    /* ============================
+       MONITORING + URL CAPTURE
+    ============================ */
+    stage('Monitoring Setup') {
+      steps {
+        script {
+          // -------- Node Exporter (Cluster B) --------
+          sh """
+            aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
+            helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+            helm repo update
+            helm upgrade --install node-exporter \
+              prometheus-community/prometheus-node-exporter \
+              -f k8s/monitoring/node-exporter-values.yaml
+          """
+
+          sleep 60
+
+          env.CLUSTER_B_METRICS = sh(
+            script: "kubectl get svc node-exporter-prometheus-node-exporter -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            returnStdout: true
+          ).trim()
+
+          // -------- Central Prometheus + Grafana --------
+          sh """
+            aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}
+            sed -i 's/<CLUSTER-B-IP>/${CLUSTER_B_METRICS}/' k8s/monitoring/central-prometheus.yaml
+            helm upgrade --install prometheus prometheus-community/prometheus \
+              -f k8s/monitoring/central-prometheus.yaml
+            helm upgrade --install grafana prometheus-community/grafana
+          """
+
+          // -------- CAPTURE APPLICATION & TOOL URLS --------
+          env.APP_B_URL = sh(
+            script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}'",
+            returnStdout: true
+          ).trim()
+
+          sh "az aks get-credentials --resource-group ${AZ_RG} --name ${AKS_NAME} --overwrite-existing"
+
+          env.APP_C_URL = sh(
+            script: "kubectl get svc -n default -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'",
+            returnStdout: true
+          ).trim()
+
+          sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
+
+          env.ARGOCD_URL = sh(
+            script: "kubectl -n argocd get svc argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            returnStdout: true
+          ).trim()
+
+          env.PROM_URL = sh(
+            script: "kubectl -n monitoring get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            returnStdout: true
+          ).trim()
+
+          env.GRAFANA_URL = sh(
+            script: "kubectl -n monitoring get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+            returnStdout: true
+          ).trim()
+        }
+      }
+    }
+  }
+
+  /* ============================
+     FINAL OUTPUT
+  ============================ */
+  post {
+    success {
+      echo """
+=================================================
+✅ PIPELINE COMPLETED SUCCESSFULLY
+=================================================
+
+🚀 APPLICATION – CLUSTER B (AWS EKS)
+----------------------------------
+http://${APP_B_URL}
+
+🚀 APPLICATION – CLUSTER C (AZURE AKS)
+----------------------------------
+http://${APP_C_URL}
+
+📦 ARGOCD
+----------------------------------
+https://${ARGOCD_URL}:8081
+Username: admin
+Password:
+kubectl -n argocd get secret argocd-initial-admin-secret \\
+  -o jsonpath="{.data.password}" | base64 -d
+
+📊 PROMETHEUS
+----------------------------------
+http://${PROM_URL}:9090
+Targets:
+http://${PROM_URL}:9090/targets
+
+📈 GRAFANA
+----------------------------------
+http://${GRAFANA_URL}:3000
+Username: admin
+Password: admin
+Dashboard ID: 1860 (Node Exporter Full)
+
+🟢 MONITORING TARGET
+----------------------------------
+Cluster B Node Exporter:
+${CLUSTER_B_METRICS}
+
+=================================================
+🎉 ALL SYSTEMS DEPLOYED & VERIFIED
+=================================================
+"""
+    }
+
+    failure {
+      echo "❌ Pipeline failed — check logs"
+    }
+
+    always {
+      cleanWs()
+    }
+  }
 }

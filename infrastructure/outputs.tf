@@ -3,7 +3,7 @@
 # Cluster B (AWS App)
 output "cluster_b_public_ip" {
   description = "Public IP of Cluster B worker node"
-  # LOG PROOF: Your logs show the module is named 'aws_eks_2'
+  # FIXED: Matches 'module.aws_eks_2' from Log 30
   value       = module.aws_eks_2.node_public_ip 
 }
 
@@ -14,7 +14,7 @@ output "cluster_b_cluster_id" {
 # Cluster C (Azure App)
 output "cluster_c_loadbalancer_dns" {
   description = "DNS name of the Load Balancer for Cluster C"
-  # LOG PROOF: Your logs show the module is named 'azure_aks_1'
+  # FIXED: Matches 'module.azure_aks_1' from Log 30
   value       = module.azure_aks_1.load_balancer_dns
 }
 

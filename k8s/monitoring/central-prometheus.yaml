@@ -1,7 +1,6 @@
 server:
   global:
     scrape_interval: 15s
-
   service:
     type: LoadBalancer
     port: 9090
