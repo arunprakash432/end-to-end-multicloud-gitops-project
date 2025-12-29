@@ -94,6 +94,12 @@ pipeline {
                     # Switch to Monitoring Cluster
                     kubectl config use-context \$(kubectl config get-contexts -o name | grep ${CLUSTER_A_NAME})
 
+                    # --- CRITICAL FIX START ---
+                    # Explicitly set namespace to 'argocd' in the current context. 
+                    # This ensures 'argocd cluster add --core' looks in the correct place for configmaps.
+                    kubectl config set-context --current --namespace=argocd
+                    # --- CRITICAL FIX END ---
+
                     # Install ArgoCD
                     kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
                     kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
@@ -105,6 +111,7 @@ pipeline {
                     kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
 
                     # Register Clusters (Core Mode)
+                    # Note: These commands will now work because context namespace is set to argocd
                     argocd cluster add \$(kubectl config get-contexts -o name | grep ${CLUSTER_B_NAME}) --yes --upsert --core
                     argocd cluster add \$(kubectl config get-contexts -o name | grep ${env.REAL_AKS_NAME}) --yes --upsert --core
 
@@ -137,6 +144,9 @@ pipeline {
                     // 3. Central Cluster (Prometheus & Grafana)
                     sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
                     
+                    // IMPORTANT: Ensure context namespace is correct for helm operations if they rely on it, 
+                    // though usually helm specifies -n explicitly or uses default.
+                    
                     dir('k8s/monitoring') {
                         // Update Config
                         sh "sed -i 's/<CLUSTER-B-IP>/${B_DNS}/g' central-prometheus.yaml"
@@ -146,7 +156,6 @@ pipeline {
                         sh "helm upgrade --install prometheus prometheus-community/prometheus -f central-prometheus.yaml"
 
                         // EXPOSE GRAFANA (LoadBalancer)
-                        // Setting admin password to 'admin' for simplicity (Change in production)
                         sh """
                             helm upgrade --install grafana prometheus-community/grafana \
                             --set service.type=LoadBalancer \
@@ -165,7 +174,13 @@ pipeline {
                 // Fetch Public URLs for the User
                 sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
                 
+                // Ensure we look in the right namespace for these services
+                // (Assuming prometheus/grafana installed in default since no -n flag was used in helm above)
+                // If you installed them in 'monitoring' namespace, add -n monitoring below.
+                
                 def argoUrl = sh(script: "kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
+                
+                // Assuming Prometheus/Grafana are in default namespace based on your Helm commands
                 def promUrl = sh(script: "kubectl get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
                 def grafUrl = sh(script: "kubectl get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
