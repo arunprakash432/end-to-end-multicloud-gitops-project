@@ -140,10 +140,9 @@ pipeline {
                     // 3. Central Cluster (Prometheus & Grafana)
                     sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
                     
-                    // --- FIX START: Add Grafana Repo ---
+                    // Add Grafana Repo (Fix for 'chart not found' error)
                     sh "helm repo add grafana https://grafana.github.io/helm-charts || true"
                     sh "helm repo update"
-                    // --- FIX END ---
 
                     dir('k8s/monitoring') {
                         // Update Config
@@ -154,7 +153,6 @@ pipeline {
                         sh "helm upgrade --install prometheus prometheus-community/prometheus -f central-prometheus.yaml"
 
                         // EXPOSE GRAFANA (LoadBalancer)
-                        // Corrected chart name from 'prometheus-community/grafana' to 'grafana/grafana'
                         sh """
                             helm upgrade --install grafana grafana/grafana \
                             --set service.type=LoadBalancer \
@@ -170,21 +168,39 @@ pipeline {
         always { cleanWs() }
         success { 
             script {
-                // Fetch Public URLs for the User
+                // --- 1. Fetch Monitoring URLs ---
                 sh "aws eks update-kubeconfig --name ${CLUSTER_A_NAME} --region ${AWS_REGION}"
                 
                 def argoUrl = sh(script: "kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
-                // Assuming Prometheus/Grafana are in default namespace
                 def promUrl = sh(script: "kubectl get svc prometheus-server -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
                 def grafUrl = sh(script: "kubectl get svc grafana -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'", returnStdout: true).trim()
 
+                // --- 2. Fetch Application URLs (AWS Cluster B) ---
+                sh "aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}"
+                // Wait briefly for ArgoCD to deploy the app
+                echo "⏳ Waiting for AWS App LoadBalancer..."
+                sleep 60 
+                // We assume the app service name is 'python-app-service' based on standard helm charts, adjust if different
+                def awsAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo 'Pending'", returnStdout: true).trim()
+
+                // --- 3. Fetch Application URLs (Azure Cluster C) ---
+                sh "az aks get-credentials --resource-group ${env.REAL_AZURE_RG} --name ${env.REAL_AKS_NAME}"
+                echo "⏳ Waiting for Azure App LoadBalancer..."
+                sleep 30
+                def azureAppUrl = sh(script: "kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo 'Pending'", returnStdout: true).trim()
+
                 echo """
                 ==========================================================
-                ✅ DEPLOYMENT SUCCESSFUL - ACCESS YOUR APPS HERE:
+                ✅ DEPLOYMENT SUCCESSFUL
                 ==========================================================
+                🛠️  INFRASTRUCTURE & MONITORING (Cluster A)
                 🚀 ArgoCD UI:      https://${argoUrl}
                 📊 Grafana UI:     http://${grafUrl} (User: admin / Pass: admin)
-                📈 Prometheus UI:  http://${promUrl}:9090
+                📈 Prometheus UI:  http://${promUrl}
+                
+                📱 APPLICATIONS
+                ☁️  AWS App (Cluster B):   http://${awsAppUrl}
+                ☁️  Azure App (Cluster C): http://${azureAppUrl}
                 ==========================================================
                 """
             }
