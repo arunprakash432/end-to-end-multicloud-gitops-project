@@ -2,18 +2,16 @@ server:
   global:
     scrape_interval: 15s
 
-  # Expose Prometheus Server to the Internet
   service:
     type: LoadBalancer
     port: 9090
 
-  # Scraping Configuration
   extraScrapeConfigs: |
     - job_name: 'cluster-b-metrics'
       scrape_interval: 15s
       static_configs:
         - targets: ['<CLUSTER-B-IP>:9100']
-   
+
     - job_name: 'cluster-c-metrics'
       scrape_interval: 15s
       static_configs:
