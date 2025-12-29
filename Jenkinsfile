@@ -169,10 +169,14 @@ pipeline {
           sh """
             aws eks update-kubeconfig --name ${CLUSTER_B_NAME} --region ${AWS_REGION}
             helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+            helm repo add grafana https://grafana.github.io/helm-charts || true
             helm repo update
-            helm upgrade --install node-exporter \
-              prometheus-community/prometheus-node-exporter \
-              -f k8s/monitoring/node-exporter-values.yaml
+
+            helm upgrade --install prometheus prometheus-community/prometheus \
+            -f k8s/monitoring/central-prometheus.yaml
+
+            helm upgrade --install grafana grafana/grafana
+
           """
 
           sleep 60
@@ -231,41 +235,41 @@ pipeline {
   post {
     success {
       echo """
-=================================================
-✅ PIPELINE COMPLETED SUCCESSFULLY
-=================================================
+            =================================================
+            ✅ PIPELINE COMPLETED SUCCESSFULLY
+            =================================================
 
-🚀 APPLICATION – CLUSTER B (AWS EKS)
-http://${APP_B_URL}
+            🚀 APPLICATION – CLUSTER B (AWS EKS)
+            http://${APP_B_URL}
 
-🚀 APPLICATION – CLUSTER C (AZURE AKS)
-http://${APP_C_URL}
+            🚀 APPLICATION – CLUSTER C (AZURE AKS)
+            http://${APP_C_URL}
 
-📦 ARGOCD
-https://${ARGOCD_URL}:8081
-Username: admin
-Password:
-kubectl -n argocd get secret argocd-initial-admin-secret \\
-  -o jsonpath="{.data.password}" | base64 -d
+            📦 ARGOCD
+            https://${ARGOCD_URL}:8081
+            Username: admin
+            Password:
+            kubectl -n argocd get secret argocd-initial-admin-secret \\
+            -o jsonpath="{.data.password}" | base64 -d
 
-📊 PROMETHEUS
-http://${PROM_URL}:9090
-Targets:
-http://${PROM_URL}:9090/targets
+            📊 PROMETHEUS
+            http://${PROM_URL}:9090
+            Targets:
+            http://${PROM_URL}:9090/targets
 
-📈 GRAFANA
-http://${GRAFANA_URL}:3000
-Username: admin
-Password: admin
-Dashboard ID: 1860 (Node Exporter Full)
+            📈 GRAFANA
+            http://${GRAFANA_URL}:3000
+            Username: admin
+            Password: admin
+            Dashboard ID: 1860 (Node Exporter Full)
 
-🟢 MONITORING TARGET
-${CLUSTER_B_METRICS}
+            🟢 MONITORING TARGET
+            ${CLUSTER_B_METRICS}
 
-=================================================
-🎉 ALL SYSTEMS DEPLOYED & VERIFIED
-=================================================
-"""
+            =================================================
+            🎉 ALL SYSTEMS DEPLOYED & VERIFIED
+            =================================================
+            """
     }
 
     failure {
